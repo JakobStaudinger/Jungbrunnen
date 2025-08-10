@@ -1,0 +1,14 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+      {
+          "label": "cargo build",
+          "type": "cargo",
+          "command": "build",
+          "args": [
+            "--features",
+            "dev_firmware"
+          ],
+      }
+  ]
+}
