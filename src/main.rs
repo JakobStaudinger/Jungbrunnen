@@ -1,8 +1,6 @@
 #![no_std]
 #![no_main]
 
-use core::cmp::Ordering;
-
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_futures::join::join3;
@@ -12,13 +10,12 @@ use embassy_rp::{
     dma::{AnyChannel, Channel, Word},
     pac::{self, SIO, dma::regs::CtrlTrig},
     peripherals::PIO1,
-    pio::{Config, InterruptHandler, Pio, ShiftConfig},
+    pio::{InterruptHandler, Pio, ShiftConfig},
     pwm::{self, Pwm, Slice},
 };
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{Duration, Instant};
 use fixed::{FixedU32, types::extra::U8};
 use heapless::Vec;
-use itertools::{Either, Itertools, Merge};
 use pio_proc::pio_asm;
 
 use {defmt_rtt as _, panic_probe as _};
@@ -27,10 +24,14 @@ bind_interrupts!(struct Irqs {
     PIO1_IRQ_0 => InterruptHandler<PIO1>;
 });
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Color(u8, u8, u8);
 
 impl Color {
+    pub fn black() -> Color {
+        Color(0, 0, 0)
+    }
+
     pub fn r(&self) -> u8 {
         self.0
     }
@@ -47,8 +48,11 @@ impl Color {
 #[derive(Clone, Copy)]
 struct Hz(pub f32);
 
-#[derive(Clone, Copy)]
-struct Percent(pub f32);
+impl Hz {
+    pub fn as_duration(self) -> Duration {
+        Duration::from_micros((1e6 / self.0) as u64)
+    }
+}
 
 #[derive(Clone, Copy)]
 struct StreamConfig {
@@ -58,64 +62,158 @@ struct StreamConfig {
     offset: Duration,
 }
 
-#[derive(Clone, Copy)]
-struct Edge {
-    time: Instant,
-    direction: EdgeDirection,
-}
+impl StreamConfig {
+    pub fn get_color_at_instant(&self, instant: Instant) -> Color {
+        if instant < self.get_start() {
+            return Color::black();
+        }
 
-impl PartialOrd for Edge {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+        let period = self.frequency.as_duration();
+        if (instant.as_micros() - self.offset.as_micros()) % period.as_micros()
+            < self.burst_duration.as_micros()
+        {
+            self.color
+        } else {
+            Color::black()
+        }
+    }
+
+    pub fn get_next_change_after(&self, instant: Option<Instant>) -> Instant {
+        let start = self.get_start();
+        match instant {
+            None => start,
+            Some(instant) => {
+                if instant < start {
+                    start
+                } else {
+                    let period = self.frequency.as_duration();
+                    let phase = Duration::from_micros(
+                        (instant.as_micros() - self.offset.as_micros()) % period.as_micros(),
+                    );
+
+                    if phase < self.burst_duration {
+                        instant + self.burst_duration - phase
+                    } else {
+                        instant + period - phase
+                    }
+                }
+            }
+        }
+    }
+
+    fn get_start(&self) -> Instant {
+        Instant::MIN + self.offset
     }
 }
 
-impl Ord for Edge {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.time.cmp(&other.time)
+#[derive(Clone, Copy, Debug)]
+struct ColorStep {
+    color: Color,
+    delay: u32,
+}
+
+impl ColorStep {
+    pub fn encode_red(&self) -> u32 {
+        self.encode(|color| color.r())
+    }
+
+    pub fn encode_green(&self) -> u32 {
+        self.encode(|color| color.g())
+    }
+
+    pub fn encode_blue(&self) -> u32 {
+        self.encode(|color| color.b())
+    }
+
+    fn encode(&self, get_color_component: impl FnOnce(Color) -> u8) -> u32 {
+        (get_color_component(self.color) as u32) << 24 | self.delay & 0xFFFFFF
     }
 }
 
-impl PartialEq for Edge {
-    fn eq(&self, other: &Self) -> bool {
-        self.time == other.time && self.direction == other.direction
-    }
+struct Config<const N: usize> {
+    streams: Vec<StreamConfig, N>,
+    micros_per_tick: i32,
+    tick_overhead: i32,
 }
 
-impl Eq for Edge {}
-
-impl Edge {
-    pub fn encode_red(&self, last_edge: &Option<Edge>) -> u16 {
-        self.encode(last_edge, |color| color.r())
-    }
-
-    pub fn encode_green(&self, last_edge: &Option<Edge>) -> u16 {
-        self.encode(last_edge, |color| color.g())
-    }
-
-    pub fn encode_blue(&self, last_edge: &Option<Edge>) -> u16 {
-        self.encode(last_edge, |color| color.b())
-    }
-
-    fn encode(
-        &self,
-        last_edge: &Option<Edge>,
-        get_color_component: impl FnOnce(Color) -> u8,
-    ) -> u16 {
-        let delay = self.time - last_edge.map(|edge| edge.time).unwrap_or(Instant::MIN);
-        let delay = (delay.as_millis() / 10) as u16 & 0xFF;
-
-        match self.direction {
-            EdgeDirection::Falling => 0x0000_u16 | delay,
-            EdgeDirection::Rising(color) => (get_color_component(color) as u16) << 8 | delay,
+impl<const N: usize> Config<N> {
+    pub fn new(streams: &[StreamConfig; N], micros_per_tick: i32, tick_overhead: i32) -> Self {
+        Self {
+            streams: Vec::from_slice(streams).unwrap(),
+            micros_per_tick,
+            tick_overhead,
         }
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum EdgeDirection {
-    Rising(Color),
-    Falling,
+impl<const N: usize> IntoIterator for Config<N> {
+    type Item = ColorStep;
+    type IntoIter = ColorStepIterator<N>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        ColorStepIterator::new(self)
+    }
+}
+
+struct ColorStepIterator<const N: usize> {
+    config: Config<N>,
+    current_time: Option<Instant>,
+}
+
+impl<const N: usize> ColorStepIterator<N> {
+    pub fn new(config: Config<N>) -> Self {
+        Self {
+            config,
+            current_time: None,
+        }
+    }
+
+    fn get_next_time_after(&self, instant: Option<Instant>) -> Option<Instant> {
+        self.config
+            .streams
+            .iter()
+            .map(|stream| stream.get_next_change_after(instant))
+            .min()
+    }
+}
+
+impl<const N: usize> Iterator for ColorStepIterator<N> {
+    type Item = ColorStep;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let next_time = self.get_next_time_after(self.current_time);
+        let next_time = next_time.unwrap();
+        let current_time = self.current_time.unwrap_or(Instant::MIN);
+
+        let color = self
+            .config
+            .streams
+            .iter()
+            .map(|stream| stream.get_color_at_instant(current_time))
+            .fold((0_u32, 0_u32, 0_u32), |sum, color| {
+                (
+                    sum.0 + color.r() as u32,
+                    sum.1 + color.g() as u32,
+                    sum.2 + color.b() as u32,
+                )
+            });
+
+        let max = color.0.max(color.1).max(color.2);
+        let diff = next_time - current_time;
+        let delay = ((diff.as_micros() / self.config.micros_per_tick as u64) as u32)
+            .saturating_sub(self.config.tick_overhead as u32);
+
+        self.current_time = Some(next_time);
+
+        let color = if max > 255 {
+            let normalize = |val| (val * 255 / max) as u8;
+            Color(normalize(color.0), normalize(color.1), normalize(color.2))
+        } else {
+            Color(color.0 as u8, color.1 as u8, color.2 as u8)
+        };
+
+        Some(ColorStep { color, delay })
+    }
 }
 
 impl StreamConfig {
@@ -125,7 +223,7 @@ impl StreamConfig {
         burst_duration: Duration,
         offset: Option<Duration>,
     ) -> Self {
-        core::assert!(burst_duration.as_micros() <= (1e9_f32 / frequency.0) as u64);
+        core::assert!(burst_duration <= frequency.as_duration());
 
         Self {
             color,
@@ -133,49 +231,6 @@ impl StreamConfig {
             burst_duration,
             offset: offset.unwrap_or_default(),
         }
-    }
-
-    pub fn into_iter(self) -> StreamConfigIterator {
-        StreamConfigIterator {
-            config: self,
-            last_edge: None,
-        }
-    }
-}
-
-struct StreamConfigIterator {
-    config: StreamConfig,
-    last_edge: Option<Edge>,
-}
-
-impl Iterator for StreamConfigIterator {
-    type Item = Edge;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let period = Duration::from_micros((1_000_000. / self.config.frequency.0) as u64);
-        let result = match self.last_edge {
-            None => Edge {
-                direction: EdgeDirection::Rising(self.config.color),
-                time: Instant::MIN + self.config.offset,
-            },
-            Some(Edge {
-                direction: EdgeDirection::Rising(_),
-                time,
-            }) => Edge {
-                direction: EdgeDirection::Falling,
-                time: time + self.config.burst_duration,
-            },
-            Some(Edge {
-                direction: EdgeDirection::Falling,
-                time,
-            }) => Edge {
-                direction: EdgeDirection::Rising(self.config.color),
-                time: time + period - self.config.burst_duration,
-            },
-        };
-
-        self.last_edge = Some(result);
-        Some(result)
     }
 }
 
@@ -196,29 +251,30 @@ async fn main(_spawner: Spawner) {
 
     let timing_program = pio_asm! {
         r#"
-            set y 0
+            .define public MICROS_PER_TICK 64
+            .define public TICK_OVERHEAD 5
             wait 0 irq 0
 
         .wrap_target
-            out x 8
+            out y 8
+            in null 8
             in y 8
-            in x 8
-            out x 8
-        wait1:
-            jmp x-- wait1 [19]
+            out x 24
+        delay:
+            jmp x-- delay
         .wrap
         "#
     };
 
-    let mut timing_config = Config::default();
+    let mut timing_config = embassy_rp::pio::Config::default();
     timing_config.use_program(&pio.common.load_program(&timing_program.program), &[]);
-    let target_frequency = 2_000.;
-    let clock_divider = (clk_sys_freq() as f64) / target_frequency;
+    let target_frequency = 1_000_000 / timing_program.public_defines.MICROS_PER_TICK;
+    let clock_divider = (clk_sys_freq() as f64) / (target_frequency as f64);
     timing_config.clock_divider = FixedU32::<U8>::checked_from_num(clock_divider).unwrap();
     timing_config.shift_out = ShiftConfig {
         direction: embassy_rp::pio::ShiftDirection::Left,
         auto_fill: true,
-        threshold: 16,
+        threshold: 32,
     };
     timing_config.shift_in = ShiftConfig {
         direction: embassy_rp::pio::ShiftDirection::Left,
@@ -237,7 +293,6 @@ async fn main(_spawner: Spawner) {
     sync_pio_to_pwm(
         [p.DMA_CH0.degrade(), p.DMA_CH1.degrade()],
         pwm_slice_red,
-        PwmChannel::A,
         1,
         0,
     );
@@ -249,7 +304,6 @@ async fn main(_spawner: Spawner) {
     sync_pio_to_pwm(
         [p.DMA_CH2.degrade(), p.DMA_CH3.degrade()],
         pwm_slice_green,
-        PwmChannel::A,
         1,
         1,
     );
@@ -261,15 +315,9 @@ async fn main(_spawner: Spawner) {
     sync_pio_to_pwm(
         [p.DMA_CH4.degrade(), p.DMA_CH5.degrade()],
         pwm_slice_blue,
-        PwmChannel::A,
         1,
         2,
     );
-
-    let mut stream_iter =
-        StreamConfig::new(Color(10, 0, 0), Hz(1.), Duration::from_millis(400), None).into_iter();
-
-    let mut last_edge = None;
 
     pio.sm0.set_config(&timing_config);
     pio.sm0.set_enable(true);
@@ -285,25 +333,48 @@ async fn main(_spawner: Spawner) {
         p.DMA_CH8.into_ref(),
         p.DMA_CH9.into_ref(),
     );
-    let mut red_data: Vec<u16, 256> = Vec::new();
-    let mut green_data: Vec<u16, 256> = Vec::new();
-    let mut blue_data: Vec<u16, 256> = Vec::new();
+    let mut red_data: Vec<u32, 256> = Vec::new();
+    let mut green_data: Vec<u32, 256> = Vec::new();
+    let mut blue_data: Vec<u32, 256> = Vec::new();
 
     pio.irq_flags.set_all(0);
 
+    let mut config = Config::new(
+        &[
+            StreamConfig::new(Color(255, 0, 0), Hz(60.), Duration::from_millis(4), None),
+            StreamConfig::new(
+                Color(0, 255, 255),
+                Hz(60.5),
+                Duration::from_millis(4),
+                Some(Duration::from_millis(500)),
+            ),
+            StreamConfig::new(
+                Color(0, 255, 0),
+                Hz(59.5),
+                Duration::from_millis(4),
+                Some(Duration::from_millis(2500)),
+            ),
+        ],
+        timing_program.public_defines.MICROS_PER_TICK,
+        timing_program.public_defines.TICK_OVERHEAD,
+    )
+    .into_iter();
+
     loop {
         info!("Loop");
+
         red_data.clear();
         green_data.clear();
         blue_data.clear();
+
         while !red_data.is_full() {
-            let edge = stream_iter.next().unwrap();
-            red_data.push(edge.encode_red(&last_edge)).unwrap();
-            green_data.push(edge.encode_green(&last_edge)).unwrap();
-            blue_data.push(edge.encode_blue(&last_edge)).unwrap();
-            last_edge = Some(edge);
+            let next = config.next().unwrap();
+
+            red_data.push(next.encode_red()).unwrap();
+            green_data.push(next.encode_green()).unwrap();
+            blue_data.push(next.encode_blue()).unwrap();
         }
-        info!("Push");
+
         join3(
             pio.sm0.tx().dma_push(dmas.0.reborrow(), &red_data),
             pio.sm1.tx().dma_push(dmas.1.reborrow(), &green_data),
@@ -313,18 +384,7 @@ async fn main(_spawner: Spawner) {
     }
 }
 
-enum PwmChannel {
-    A,
-    B,
-}
-
-fn sync_pio_to_pwm(
-    dmas: [AnyChannel; 2],
-    pwm_slice: usize,
-    channel: PwmChannel,
-    pio_number: u8,
-    sm: u8,
-) {
+fn sync_pio_to_pwm(dmas: [AnyChannel; 2], pwm_slice: usize, pio_number: u8, sm: u8) {
     let raw_pwm = pac::PWM.ch(pwm_slice);
 
     let treq_sel = pac::dma::vals::TreqSel::from(pio_number * 8 + sm + 4);
@@ -332,20 +392,14 @@ fn sync_pio_to_pwm(
     let [first_dma, second_dma] = dmas;
     let r = first_dma.regs();
 
-    let offset = match channel {
-        PwmChannel::A => 0,
-        PwmChannel::B => 2,
-    };
-
-    r.write_addr()
-        .write_value(raw_pwm.cc().as_ptr() as u32 + offset);
+    r.write_addr().write_value(raw_pwm.cc().as_ptr() as u32);
     r.read_addr()
         .write_value(pac::PIO1.rxf(sm as usize).as_ptr() as u32);
     r.trans_count().write_value(u32::MAX);
     r.al1_ctrl().write(|val| {
         let mut w = CtrlTrig(0);
         w.set_treq_sel(treq_sel);
-        w.set_data_size(u8::size());
+        w.set_data_size(u16::size());
         w.set_chain_to(second_dma.number());
         w.set_incr_read(false);
         w.set_incr_write(false);
@@ -356,14 +410,13 @@ fn sync_pio_to_pwm(
 
     let r = second_dma.regs();
 
-    r.write_addr()
-        .write_value(raw_pwm.cc().as_ptr() as u32 + offset);
+    r.write_addr().write_value(raw_pwm.cc().as_ptr() as u32);
     r.read_addr()
         .write_value(pac::PIO1.rxf(sm as usize).as_ptr() as u32);
     r.trans_count().write_value(u32::MAX);
     r.ctrl_trig().write(|w| {
         w.set_treq_sel(treq_sel);
-        w.set_data_size(u8::size());
+        w.set_data_size(u16::size());
         w.set_chain_to(first_dma.number());
         w.set_incr_read(false);
         w.set_incr_write(false);
