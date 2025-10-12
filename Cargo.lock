@@ -833,42 +833,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
-name = "fountain-of-youth"
-version = "0.1.0"
-dependencies = [
- "assign-resources",
- "cortex-m",
- "cortex-m-rt",
- "cyw43",
- "cyw43-pio",
- "defmt 0.3.100",
- "defmt-rtt",
- "embassy-embedded-hal 0.3.2",
- "embassy-executor",
- "embassy-futures",
- "embassy-net",
- "embassy-net-wiznet",
- "embassy-rp",
- "embassy-sync 0.6.2",
- "embassy-time",
- "embassy-usb-driver",
- "embassy-usb-logger",
- "embedded-hal-async",
- "fixed",
- "heapless 0.7.17",
- "heapless 0.8.0",
- "indoc",
- "log",
- "mqttrs",
- "panic-probe",
- "pio",
- "pio-proc",
- "portable-atomic",
- "rand_core",
- "static_cell",
-]
-
-[[package]]
 name = "futures"
 version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1075,6 +1039,42 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0fd2260e829bddf4cb6ea802289de2f86d6a7a690192fbe91b3f46e0f2c8473"
 dependencies = [
  "either",
+]
+
+[[package]]
+name = "jungbrunnen"
+version = "0.1.0"
+dependencies = [
+ "assign-resources",
+ "cortex-m",
+ "cortex-m-rt",
+ "cyw43",
+ "cyw43-pio",
+ "defmt 0.3.100",
+ "defmt-rtt",
+ "embassy-embedded-hal 0.3.2",
+ "embassy-executor",
+ "embassy-futures",
+ "embassy-net",
+ "embassy-net-wiznet",
+ "embassy-rp",
+ "embassy-sync 0.6.2",
+ "embassy-time",
+ "embassy-usb-driver",
+ "embassy-usb-logger",
+ "embedded-hal-async",
+ "fixed",
+ "heapless 0.7.17",
+ "heapless 0.8.0",
+ "indoc",
+ "log",
+ "mqttrs",
+ "panic-probe",
+ "pio",
+ "pio-proc",
+ "portable-atomic",
+ "rand_core",
+ "static_cell",
 ]
 
 [[package]]

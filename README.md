@@ -1,4 +1,4 @@
-# Fountain of Youth
+# Jungbrunnen
 An embedded project using a Raspberry Pi Pico to strobe LEDs to make it look like water droplets are floating in mid-air.
 Heavily inspired by [isaac879's RGB Time Fountain](https://github.com/isaac879/RGB-Time-Fountain)
 
