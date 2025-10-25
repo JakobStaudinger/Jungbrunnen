@@ -1,7 +1,7 @@
 use defmt::*;
 use embassy_futures::join::join3;
 use embassy_rp::{
-    Peripheral, bind_interrupts,
+    bind_interrupts,
     clocks::clk_sys_freq,
     dma::{AnyChannel, Channel, Word},
     pac::{self, dma::regs::CtrlTrig},
@@ -12,7 +12,7 @@ use embassy_rp::{
 use embassy_time::Duration;
 use fixed::{FixedU32, types::extra::U8};
 use heapless::Vec;
-use pio_proc::pio_asm;
+use pio::pio_asm;
 
 use crate::{
     peripherals::LedPeripherals,
@@ -24,7 +24,7 @@ bind_interrupts!(struct Irqs {
 });
 
 #[embassy_executor::task]
-pub async fn orchestrate_leds(p: LedPeripherals) {
+pub async fn orchestrate_leds(mut p: LedPeripherals) {
     let mut pio = Pio::new(p.pio, Irqs);
 
     let timing_program = pio_asm! {
@@ -69,7 +69,7 @@ pub async fn orchestrate_leds(p: LedPeripherals) {
     core::mem::forget(pwm);
 
     sync_pio_to_pwm(
-        [p.dma_pwm_red_a.degrade(), p.dma_pwm_red_b.degrade()],
+        [*p.dma_pwm_red_a.into(), *p.dma_pwm_red_b.into()],
         pwm_slice_red,
         1,
         0,
@@ -80,7 +80,7 @@ pub async fn orchestrate_leds(p: LedPeripherals) {
     core::mem::forget(pwm);
 
     sync_pio_to_pwm(
-        [p.dma_pwm_green_a.degrade(), p.dma_pwm_green_b.degrade()],
+        [*p.dma_pwm_green_a.into(), *p.dma_pwm_green_b.into()],
         pwm_slice_green,
         1,
         1,
@@ -91,7 +91,7 @@ pub async fn orchestrate_leds(p: LedPeripherals) {
     core::mem::forget(pwm);
 
     sync_pio_to_pwm(
-        [p.dma_pwm_blue_a.degrade(), p.dma_pwm_blue_b.degrade()],
+        [*p.dma_pwm_blue_a.into(), *p.dma_pwm_blue_b.into()],
         pwm_slice_blue,
         1,
         2,
@@ -133,10 +133,6 @@ pub async fn orchestrate_leds(p: LedPeripherals) {
     )
     .into_iter();
 
-    let mut dma_pio_red = p.dma_pio_red.into_ref();
-    let mut dma_pio_green = p.dma_pio_green.into_ref();
-    let mut dma_pio_blue = p.dma_pio_blue.into_ref();
-
     loop {
         info!("Loop");
 
@@ -153,9 +149,15 @@ pub async fn orchestrate_leds(p: LedPeripherals) {
         }
 
         join3(
-            pio.sm0.tx().dma_push(dma_pio_red.reborrow(), &red_data),
-            pio.sm1.tx().dma_push(dma_pio_green.reborrow(), &green_data),
-            pio.sm2.tx().dma_push(dma_pio_blue.reborrow(), &blue_data),
+            pio.sm0
+                .tx()
+                .dma_push(p.dma_pio_red.reborrow(), &red_data, false),
+            pio.sm1
+                .tx()
+                .dma_push(p.dma_pio_green.reborrow(), &green_data, false),
+            pio.sm2
+                .tx()
+                .dma_push(p.dma_pio_blue.reborrow(), &blue_data, false),
         )
         .await;
     }

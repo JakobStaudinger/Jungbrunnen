@@ -1,5 +1,5 @@
 use assign_resources::assign_resources;
-use embassy_rp::peripherals;
+use embassy_rp::{Peri, peripherals};
 
 assign_resources! {
   led: LedPeripherals {
