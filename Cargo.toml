@@ -40,7 +40,7 @@ embassy-net-wiznet = { version = "0.2.1", features = ["defmt"] }
 cyw43 = { version = "0.5.0", features = ["defmt", "firmware-logs"] }
 cyw43-pio = { version = "0.8.0", features = ["defmt"] }
 static_cell = { version = "2" }
-heapless = { version = "0.9.1", features = ["defmt"] }
+heapless = { version = "0.8.0", features = ["defmt-03"] }
 rand_core = "0.9.3"
 mqttrs = { version = "0.4.1", default-features = false }
 indoc = "2.0.7"

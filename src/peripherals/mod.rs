@@ -19,5 +19,13 @@ assign_resources! {
     dma_pio_red: DMA_CH6,
     dma_pio_green: DMA_CH7,
     dma_pio_blue: DMA_CH8,
-  }
+  },
+  wifi: WifiPeripherals {
+    pio: PIO0,
+    pwr: PIN_23,
+    cs: PIN_25,
+    dio: PIN_24,
+    clk: PIN_29,
+    dma: DMA_CH9,
+  },
 }
