@@ -41,7 +41,7 @@ async fn main(spawner: Spawner) {
 
     let ssid = env!("WIFI_SSID");
     let password = env!("WIFI_PASSWORD");
-    let cyw43 = cyw43.join(ssid, password).await;
+    // let cyw43 = cyw43.join(ssid, password).await;
 
     spawner.must_spawn(orchestrate_leds(p.led));
 

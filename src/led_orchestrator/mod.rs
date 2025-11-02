@@ -1,5 +1,5 @@
 use defmt::*;
-use embassy_futures::join::join3;
+use embassy_futures::{join::join4, yield_now};
 use embassy_rp::{
     bind_interrupts,
     clocks::clk_sys_freq,
@@ -16,7 +16,7 @@ use pio::pio_asm;
 
 use crate::{
     peripherals::LedPeripherals,
-    stream::{self, Color, Hz, StreamConfig},
+    stream::{self, Color, ColorStepIterator, Hz, StreamConfig},
 };
 
 bind_interrupts!(struct Irqs {
@@ -106,25 +106,21 @@ pub async fn orchestrate_leds(mut p: LedPeripherals) {
     pio.sm2.set_config(&timing_config);
     pio.sm2.set_enable(true);
 
-    let mut red_data: Vec<u32, 256> = Vec::new();
-    let mut green_data: Vec<u32, 256> = Vec::new();
-    let mut blue_data: Vec<u32, 256> = Vec::new();
-
     pio.irq_flags.set_all(0);
 
     let mut config = stream::Config::new(
         &[
-            StreamConfig::new(Color(255, 0, 0), Hz(60.), Duration::from_millis(4), None),
+            StreamConfig::new(Color(255, 0, 0), Hz(60.), Duration::from_millis(3), None),
             StreamConfig::new(
                 Color(0, 255, 255),
                 Hz(60.5),
-                Duration::from_millis(4),
+                Duration::from_millis(3),
                 Some(Duration::from_millis(500)),
             ),
             StreamConfig::new(
-                Color(0, 255, 0),
+                Color(0, 255, 00),
                 Hz(59.5),
-                Duration::from_millis(4),
+                Duration::from_millis(3),
                 Some(Duration::from_millis(2500)),
             ),
         ],
@@ -133,34 +129,51 @@ pub async fn orchestrate_leds(mut p: LedPeripherals) {
     )
     .into_iter();
 
+    let (mut red, mut green, mut blue) = calculate_next_buffer::<_, 2048>(&mut config).await;
+
     loop {
         info!("Loop");
 
-        red_data.clear();
-        green_data.clear();
-        blue_data.clear();
-
-        while !red_data.is_full() {
-            let next = config.next().unwrap();
-
-            red_data.push(next.encode_red()).unwrap();
-            green_data.push(next.encode_green()).unwrap();
-            blue_data.push(next.encode_blue()).unwrap();
-        }
-
-        join3(
-            pio.sm0
-                .tx()
-                .dma_push(p.dma_pio_red.reborrow(), &red_data, false),
+        let ((r, g, b), _, _, _) = join4(
+            calculate_next_buffer(&mut config),
+            pio.sm0.tx().dma_push(p.dma_pio_red.reborrow(), &red, false),
             pio.sm1
                 .tx()
-                .dma_push(p.dma_pio_green.reborrow(), &green_data, false),
+                .dma_push(p.dma_pio_green.reborrow(), &green, false),
             pio.sm2
                 .tx()
-                .dma_push(p.dma_pio_blue.reborrow(), &blue_data, false),
+                .dma_push(p.dma_pio_blue.reborrow(), &blue, false),
         )
         .await;
+
+        red = r;
+        green = g;
+        blue = b;
     }
+}
+
+async fn calculate_next_buffer<const NUM_STREAMS: usize, const BUFFER_SIZE: usize>(
+    config: &mut ColorStepIterator<NUM_STREAMS>,
+) -> (
+    Vec<u32, BUFFER_SIZE>,
+    Vec<u32, BUFFER_SIZE>,
+    Vec<u32, BUFFER_SIZE>,
+) {
+    let mut red = Vec::new();
+    let mut green = Vec::new();
+    let mut blue = Vec::new();
+
+    while !red.is_full() {
+        let next = config.next().unwrap();
+
+        red.push(next.encode_red()).unwrap();
+        green.push(next.encode_green()).unwrap();
+        blue.push(next.encode_blue()).unwrap();
+
+        yield_now().await;
+    }
+
+    return (red, green, blue);
 }
 
 fn sync_pio_to_pwm(dmas: [AnyChannel; 2], pwm_slice: usize, pio_number: u8, sm: u8) {
